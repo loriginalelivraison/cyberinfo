@@ -18,12 +18,27 @@ const app = express();
 
 // ---------- middlewares de base ----------
 app.use(express.json());
-app.use(
-  cors({
-    origin: process.env.CORS_ORIGIN, // ex: http://localhost:5173
-    credentials: true,
-  })
-);
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+app.use((req, res, next) => { res.setHeader("Vary", "Origin"); next(); });
+
+app.use(cors({
+  origin(origin, cb) {
+    // autoriser Postman/cURL (origin = undefined)
+    if (!origin) return cb(null, true);
+    // si aucune liste => tout autoriser (à éviter en prod)
+    if (ALLOWED_ORIGINS.length === 0) return cb(null, true);
+    // vérifier la liste
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error(`CORS blocked: ${origin}`));
+  },
+  credentials: true,
+}));
+
+app.options("*", cors());
 
 // ---------- DB ----------
 if (!process.env.MONGODB_URI) {
@@ -41,16 +56,16 @@ connectDB(process.env.MONGODB_URI)
 app.get("/api/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
 // ---------- fichiers statiques (pour OUVRIR pdf/vidéos) ----------
-app.use("/uploads", express.static(path.resolve("uploads")));
+app.use("/api/uploads", express.static(path.resolve("uploads")));
 
 // ---------- API ----------
 app.use("/api/upload", uploadRoutes);     // POST upload + GET force download (pdf/video)
-app.use("/cloudinary", cloudinaryRoutes); // signature pour images Cloudinary
+app.use("/api/cloudinary", cloudinaryRoutes); // signature pour images Cloudinary
 
 // tes autres routes métiers
-app.use("/", aadlRoutes);
-app.use("/aadl", aadldemande);
-app.use("/", docimpressionRoutes);        // expose /docimpression
+app.use("/api/", aadlRoutes);
+app.use("/api/aadl", aadldemande);
+app.use("/api/", docimpressionRoutes);        // expose /docimpression
 
 // ---------- boot ----------
 const PORT = process.env.PORT || 8080;
