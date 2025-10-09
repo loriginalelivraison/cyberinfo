@@ -4,8 +4,46 @@ import { URL } from "url";
 
 const router = express.Router();
 
+/* -------- helpers nom/extension -------- */
 function cleanName(name) {
   return (name || "").replace(/[\\\/]+/g, " ").trim() || "file";
+}
+function hasExt(name) {
+  return /\.[a-z0-9]{1,6}$/i.test(name || "");
+}
+function extFromPath(pathname = "") {
+  const m = pathname.match(/\.([a-z0-9]{1,6})(?:\?|#|$)/i);
+  return m ? m[1].toLowerCase() : null;
+}
+function extFromContentType(ct = "") {
+  const m = ct.toLowerCase();
+  const map = {
+    "application/pdf": "pdf",
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "image/bmp": "bmp",
+    "image/tiff": "tiff",
+    "audio/mpeg": "mp3",
+    "audio/mp4": "m4a",
+    "audio/ogg": "ogg",
+    "audio/wav": "wav",
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "video/quicktime": "mov",
+    "application/zip": "zip",
+    "application/x-zip-compressed": "zip",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-powerpoint": "ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    "text/plain": "txt",
+    "application/json": "json",
+  };
+  return map[m] || null;
 }
 function withDl(u, filename) {
   const out = new URL(u.toString());
@@ -20,13 +58,24 @@ function withFlAttachment(u, filename) {
   out.pathname = out.pathname.replace("/upload/", `/upload/fl_attachment:${enc}/`);
   return out;
 }
-async function streamToClient(urlObj, res, filename) {
+
+/* -------- streaming -------- */
+async function streamToClient(urlObj, res, baseFilename) {
   const up = await fetch(urlObj.toString(), { redirect: "follow" });
   if (!up.ok) return { ok: false, status: up.status };
 
+  // détermine un nom AVEC extension
   const ct = up.headers.get("content-type") || "application/octet-stream";
+  let finalName = cleanName(baseFilename);
+  if (!hasExt(finalName)) {
+    const extPath = extFromPath(urlObj.pathname);
+    const extCT = extFromContentType(ct);
+    const ext = extPath || extCT;
+    if (ext) finalName = `${finalName}.${ext}`;
+  }
+
   res.setHeader("Content-Type", ct);
-  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.setHeader("Content-Disposition", `attachment; filename="${finalName}"`);
   res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
 
   if (!up.body) return { ok: false, status: 500, reason: "no body" };
@@ -34,15 +83,15 @@ async function streamToClient(urlObj, res, filename) {
   return { ok: true };
 }
 
+/* -------- route -------- */
 /**
- * GET /api/download?url=<cloudinaryUrl>&filename=<nom.ext>
- * - Plan A : stream l’URL + ?dl= (on force le download côté serveur)
- * - Plan B : ré-essai en insérant fl_attachment:<nom> dans le path + ?dl=
- * - Plan C : redirection 302 vers Cloudinary si l’amont refuse (401/403/…)
+ * GET /api/download?url=<cloudinaryUrl>&filename=<nom (avec ou sans extension)>
+ * - Streame l’asset et ajoute l’extension si absente (depuis Content-Type ou chemin)
+ * - Fallback avec fl_attachment puis redirection si nécessaire
  */
 router.get("/download", async (req, res) => {
   const rawUrl = req.query?.url;
-  const filename = cleanName(req.query?.filename);
+  const requestedName = cleanName(req.query?.filename);
 
   if (!rawUrl) return res.status(400).json({ ok: false, error: "Missing url param" });
 
@@ -53,30 +102,37 @@ router.get("/download", async (req, res) => {
     return res.status(400).json({ ok: false, error: "Invalid url param" });
   }
 
-  // on accepte *.cloudinary.com (ex: res.cloudinary.com)
+  // on accepte *.cloudinary.com
   const host = (target.hostname || "").toLowerCase();
   const isCloudinary = host.endsWith(".cloudinary.com");
   if (!isCloudinary) {
-    // ne bloque pas l'utilisateur : redirection directe
-    return res.redirect(302, withDl(target, filename).toString());
+    // ne bloque pas: redirection simple (le navigateur prendra le nom par défaut)
+    return res.redirect(302, withDl(target, requestedName).toString());
   }
 
   try {
-    // A) stream avec ?dl=
-    const A = withDl(target, filename);
-    const a = await streamToClient(A, res, filename);
+    // A) stream + ?dl= (on fixera l'extension côté serveur)
+    const A = withDl(target, requestedName);
+    const a = await streamToClient(A, res, requestedName);
     if (a.ok) return;
 
     // B) stream avec fl_attachment + ?dl=
-    const B = withDl(withFlAttachment(target, filename), filename);
-    const b = await streamToClient(B, res, filename);
+    const B = withDl(withFlAttachment(target, requestedName), requestedName);
+    const b = await streamToClient(B, res, requestedName);
     if (b.ok) return;
 
-    // C) redirect 302 vers Cloudinary (fl_attachment + ?dl)
-    return res.redirect(302, B.toString());
-  } catch (e) {
-    // fallback final : redirect simple
-    return res.redirect(302, withDl(target, filename).toString());
+    // C) redirection 302 (au cas où)
+    // on ajoute une extension probable pour la redirection (depuis le chemin)
+    let nameForRedirect = requestedName;
+    if (!hasExt(nameForRedirect)) {
+      const extP = extFromPath(target.pathname);
+      if (extP) nameForRedirect = `${nameForRedirect}.${extP}`;
+    }
+    const C = withDl(withFlAttachment(target, nameForRedirect), nameForRedirect);
+    return res.redirect(302, C.toString());
+  } catch {
+    const F = withDl(target, requestedName);
+    return res.redirect(302, F.toString());
   }
 });
 
