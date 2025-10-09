@@ -6,17 +6,17 @@ const router = express.Router();
 
 /* -------- helpers nom/extension -------- */
 function cleanName(name) {
-  return (name || "").replace(/[\\\/]+/g, " ").trim() || "file";
+  return (name || "").replace(/[\\\/]+/g, " ").trim();
 }
 function hasExt(name) {
   return /\.[a-z0-9]{1,6}$/i.test(name || "");
 }
 function extFromPath(pathname = "") {
+  // essaie d'abord la fin (public_id.ext) sinon, le dernier segment "xxx.ext"
   const m = pathname.match(/\.([a-z0-9]{1,6})(?:\?|#|$)/i);
   return m ? m[1].toLowerCase() : null;
 }
 function extFromContentType(ct = "") {
-  const m = ct.toLowerCase();
   const map = {
     "application/pdf": "pdf",
     "image/jpeg": "jpg",
@@ -43,8 +43,34 @@ function extFromContentType(ct = "") {
     "text/plain": "txt",
     "application/json": "json",
   };
-  return map[m] || null;
+  return map[(ct || "").toLowerCase()] || null;
 }
+function ensureNameWithExt({ desiredName, urlPath, contentType }) {
+  let base = cleanName(desiredName) || "";                // peut être vide
+  let ext = null;
+
+  // 1) essaie l’ext depuis l’URL
+  ext = extFromPath(urlPath);
+
+  // 2) si pas d’ext trouvée, on tentera via Content-Type plus tard
+  if (!base) {
+    // si aucun nom demandé, prends le dernier segment de l’URL (sans query)
+    const seg = (urlPath || "").split("/").pop() || "file";
+    base = seg.replace(/\.[a-z0-9]{1,6}$/i, "");         // enlève ext si présente
+  } else {
+    // si un nom est fourni et a déjà une ext, on garde
+    if (hasExt(base)) return base;
+  }
+
+  // si base n’a pas d’ext, tente Content-Type
+  if (!ext && contentType) {
+    ext = extFromContentType(contentType);
+  }
+
+  return ext ? `${base}.${ext}` : base;                   // si pas d’ext => au moins un nom lisible
+}
+
+/* -------- URL helpers -------- */
 function withDl(u, filename) {
   const out = new URL(u.toString());
   if (filename) out.searchParams.set("dl", filename);
@@ -60,58 +86,59 @@ function withFlAttachment(u, filename) {
 }
 
 /* -------- streaming -------- */
-async function streamToClient(urlObj, res, baseFilename) {
-  const up = await fetch(urlObj.toString(), { redirect: "follow" });
-  if (!up.ok) return { ok: false, status: up.status };
+async function streamToClient(urlObj, res, requestedName) {
+  const upstream = await fetch(urlObj.toString(), { redirect: "follow" });
+  if (!upstream.ok) return { ok: false, status: upstream.status };
 
-  // détermine un nom AVEC extension
-  const ct = up.headers.get("content-type") || "application/octet-stream";
-  let finalName = cleanName(baseFilename);
-  if (!hasExt(finalName)) {
-    const extPath = extFromPath(urlObj.pathname);
-    const extCT = extFromContentType(ct);
-    const ext = extPath || extCT;
-    if (ext) finalName = `${finalName}.${ext}`;
-  }
+  const ct = upstream.headers.get("content-type") || "application/octet-stream";
+  const finalName = ensureNameWithExt({
+    desiredName: requestedName,
+    urlPath: urlObj.pathname,
+    contentType: ct,
+  }) || "file";
+
+  // Content-Disposition robuste: filename + filename* (RFC 5987)
+  const asciiName = finalName.replace(/[^\x20-\x7E]+/g, "_"); // fallback ASCII
+  const utf8Name = encodeURIComponent(finalName).replace(/'/g, "%27");
 
   res.setHeader("Content-Type", ct);
-  res.setHeader("Content-Disposition", `attachment; filename="${finalName}"`);
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="${asciiName}"; filename*=UTF-8''${utf8Name}`
+  );
   res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
 
-  if (!up.body) return { ok: false, status: 500, reason: "no body" };
-  up.body.pipe(res);
+  if (!upstream.body) return { ok: false, status: 500, reason: "no body" };
+  upstream.body.pipe(res);
   return { ok: true };
 }
 
 /* -------- route -------- */
 /**
  * GET /api/download?url=<cloudinaryUrl>&filename=<nom (avec ou sans extension)>
- * - Streame l’asset et ajoute l’extension si absente (depuis Content-Type ou chemin)
+ * - Streame l’asset et **ajoute l’extension si absente** (depuis Content-Type ou chemin)
  * - Fallback avec fl_attachment puis redirection si nécessaire
+ * - N’EXIGE PAS que filename soit fourni par le front
  */
 router.get("/download", async (req, res) => {
   const rawUrl = req.query?.url;
-  const requestedName = cleanName(req.query?.filename);
+  const requestedName = cleanName(req.query?.filename); // peut être vide
 
   if (!rawUrl) return res.status(400).json({ ok: false, error: "Missing url param" });
 
   let target;
-  try {
-    target = new URL(rawUrl);
-  } catch {
-    return res.status(400).json({ ok: false, error: "Invalid url param" });
-  }
+  try { target = new URL(rawUrl); }
+  catch { return res.status(400).json({ ok: false, error: "Invalid url param" }); }
 
-  // on accepte *.cloudinary.com
+  // Cloudinary seulement (plus tolérant: *.cloudinary.com)
   const host = (target.hostname || "").toLowerCase();
   const isCloudinary = host.endsWith(".cloudinary.com");
   if (!isCloudinary) {
-    // ne bloque pas: redirection simple (le navigateur prendra le nom par défaut)
     return res.redirect(302, withDl(target, requestedName).toString());
   }
 
   try {
-    // A) stream + ?dl= (on fixera l'extension côté serveur)
+    // A) stream + ?dl=
     const A = withDl(target, requestedName);
     const a = await streamToClient(A, res, requestedName);
     if (a.ok) return;
@@ -121,18 +148,12 @@ router.get("/download", async (req, res) => {
     const b = await streamToClient(B, res, requestedName);
     if (b.ok) return;
 
-    // C) redirection 302 (au cas où)
-    // on ajoute une extension probable pour la redirection (depuis le chemin)
-    let nameForRedirect = requestedName;
-    if (!hasExt(nameForRedirect)) {
-      const extP = extFromPath(target.pathname);
-      if (extP) nameForRedirect = `${nameForRedirect}.${extP}`;
-    }
-    const C = withDl(withFlAttachment(target, nameForRedirect), nameForRedirect);
-    return res.redirect(302, C.toString());
+    // C) redirection 302 (garde un nom plausible côté Cloudinary)
+    //      on ajoute au moins ?dl=<nom> (si Cloudinary l’honore)
+    return res.redirect(302, B.toString());
   } catch {
-    const F = withDl(target, requestedName);
-    return res.redirect(302, F.toString());
+    // ultime fallback: redirect simple
+    return res.redirect(302, withDl(target, requestedName).toString());
   }
 });
 
