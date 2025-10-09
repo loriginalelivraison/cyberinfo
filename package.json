@@ -15,7 +15,8 @@
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "mongoose": "^8.6.1",
-    "multer": "^2.0.2"
+    "multer": "^2.0.2",
+    "streamifier": "^0.1.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
