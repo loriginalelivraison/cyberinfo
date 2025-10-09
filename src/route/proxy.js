@@ -4,7 +4,7 @@ import { URL } from "url";
 
 const router = express.Router();
 
-/* -------- helpers nom/extension -------- */
+/* ---------------- helpers nom/extension ---------------- */
 function cleanName(name) {
   return (name || "").replace(/[\\\/]+/g, " ").trim();
 }
@@ -12,7 +12,6 @@ function hasExt(name) {
   return /\.[a-z0-9]{1,6}$/i.test(name || "");
 }
 function extFromPath(pathname = "") {
-  // essaie d'abord la fin (public_id.ext) sinon, le dernier segment "xxx.ext"
   const m = pathname.match(/\.([a-z0-9]{1,6})(?:\?|#|$)/i);
   return m ? m[1].toLowerCase() : null;
 }
@@ -45,32 +44,44 @@ function extFromContentType(ct = "") {
   };
   return map[(ct || "").toLowerCase()] || null;
 }
-function ensureNameWithExt({ desiredName, urlPath, contentType }) {
-  let base = cleanName(desiredName) || "";                // peut être vide
-  let ext = null;
-
-  // 1) essaie l’ext depuis l’URL
-  ext = extFromPath(urlPath);
-
-  // 2) si pas d’ext trouvée, on tentera via Content-Type plus tard
+function parseUpstreamFilename(cd = "") {
+  // Ex: attachment; filename="name.pdf"; filename*=UTF-8''name.pdf
+  try {
+    const v = cd || "";
+    // filename* (RFC 5987) prioritaire
+    const star = v.match(/filename\*\s*=\s*([^;]+)/i);
+    if (star) {
+      let val = star[1].trim();
+      // format: UTF-8''...encodé
+      const m = val.match(/^[^']*''(.+)$/);
+      if (m) return decodeURIComponent(m[1]);
+      return decodeURIComponent(val);
+    }
+    // filename="..."
+    const simple = v.match(/filename\s*=\s*("?)([^";]+)\1/i);
+    if (simple) return simple[2].trim();
+  } catch {}
+  return null;
+}
+function ensureNameWithExt({ desiredName, urlPath, contentType, upstreamFilename }) {
+  // Ordre de préférence pour le nom de base :
+  // 1) upstream filename si présent
+  // 2) desiredName (query "filename")
+  // 3) dernier segment de l’URL
+  let base = cleanName(upstreamFilename) || cleanName(desiredName);
   if (!base) {
-    // si aucun nom demandé, prends le dernier segment de l’URL (sans query)
     const seg = (urlPath || "").split("/").pop() || "file";
-    base = seg.replace(/\.[a-z0-9]{1,6}$/i, "");         // enlève ext si présente
-  } else {
-    // si un nom est fourni et a déjà une ext, on garde
-    if (hasExt(base)) return base;
+    base = seg.replace(/\.[a-z0-9]{1,6}$/i, "");
   }
+  if (hasExt(base)) return base;
 
-  // si base n’a pas d’ext, tente Content-Type
-  if (!ext && contentType) {
-    ext = extFromContentType(contentType);
-  }
-
-  return ext ? `${base}.${ext}` : base;                   // si pas d’ext => au moins un nom lisible
+  // Déterminer extension
+  let ext = extFromPath(urlPath);
+  if (!ext && contentType) ext = extFromContentType(contentType);
+  return ext ? `${base}.${ext}` : base;
 }
 
-/* -------- URL helpers -------- */
+/* ---------------- URL helpers ---------------- */
 function withDl(u, filename) {
   const out = new URL(u.toString());
   if (filename) out.searchParams.set("dl", filename);
@@ -85,21 +96,25 @@ function withFlAttachment(u, filename) {
   return out;
 }
 
-/* -------- streaming -------- */
+/* ---------------- streaming ---------------- */
 async function streamToClient(urlObj, res, requestedName) {
   const upstream = await fetch(urlObj.toString(), { redirect: "follow" });
   if (!upstream.ok) return { ok: false, status: upstream.status };
 
   const ct = upstream.headers.get("content-type") || "application/octet-stream";
-  const finalName = ensureNameWithExt({
+  const cdUp = upstream.headers.get("content-disposition") || "";
+  const upstreamName = parseUpstreamFilename(cdUp);
+
+  const finalNameNoAscii = ensureNameWithExt({
     desiredName: requestedName,
     urlPath: urlObj.pathname,
     contentType: ct,
+    upstreamFilename: upstreamName,
   }) || "file";
 
-  // Content-Disposition robuste: filename + filename* (RFC 5987)
-  const asciiName = finalName.replace(/[^\x20-\x7E]+/g, "_"); // fallback ASCII
-  const utf8Name = encodeURIComponent(finalName).replace(/'/g, "%27");
+  // Content-Disposition robuste (ASCII + UTF-8)
+  const asciiName = finalNameNoAscii.replace(/[^\x20-\x7E]+/g, "_");
+  const utf8Name = encodeURIComponent(finalNameNoAscii).replace(/'/g, "%27");
 
   res.setHeader("Content-Type", ct);
   res.setHeader(
@@ -113,12 +128,13 @@ async function streamToClient(urlObj, res, requestedName) {
   return { ok: true };
 }
 
-/* -------- route -------- */
+/* ---------------- route ---------------- */
 /**
- * GET /api/download?url=<cloudinaryUrl>&filename=<nom (avec ou sans extension)>
- * - Streame l’asset et **ajoute l’extension si absente** (depuis Content-Type ou chemin)
- * - Fallback avec fl_attachment puis redirection si nécessaire
- * - N’EXIGE PAS que filename soit fourni par le front
+ * GET /api/download?url=<cloudinaryUrl>&filename=<nom (optionnel, avec ou sans extension)>
+ * - Récupère le flux Cloudinary
+ * - Extrait le nom depuis Content-Disposition amont si dispo, sinon param/URL
+ * - Garantit une extension (Content-Type, chemin ou upstream)
+ * - Fallback fl_attachment puis redirect si nécessaire
  */
 router.get("/download", async (req, res) => {
   const rawUrl = req.query?.url;
@@ -130,10 +146,11 @@ router.get("/download", async (req, res) => {
   try { target = new URL(rawUrl); }
   catch { return res.status(400).json({ ok: false, error: "Invalid url param" }); }
 
-  // Cloudinary seulement (plus tolérant: *.cloudinary.com)
+  // Cloudinary seulement (souple: *.cloudinary.com)
   const host = (target.hostname || "").toLowerCase();
   const isCloudinary = host.endsWith(".cloudinary.com");
   if (!isCloudinary) {
+    // ne bloque pas : redirect (Cloudinary ou autre)
     return res.redirect(302, withDl(target, requestedName).toString());
   }
 
@@ -148,11 +165,10 @@ router.get("/download", async (req, res) => {
     const b = await streamToClient(B, res, requestedName);
     if (b.ok) return;
 
-    // C) redirection 302 (garde un nom plausible côté Cloudinary)
-    //      on ajoute au moins ?dl=<nom> (si Cloudinary l’honore)
+    // C) redirect 302 (Cloudinary honorera souvent le ?dl + fl_attachment)
     return res.redirect(302, B.toString());
   } catch {
-    // ultime fallback: redirect simple
+    // Ultime fallback
     return res.redirect(302, withDl(target, requestedName).toString());
   }
 });
