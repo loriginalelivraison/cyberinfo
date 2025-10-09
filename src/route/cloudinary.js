@@ -1,27 +1,30 @@
-import express from "express";
-import cloudinary from "cloudinary";
+// src/lib/cloudinary.js
+import { v2 as cloudinary } from "cloudinary";
+import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
 
-const router = express.Router();
+// ── Charger le .env ici (avant cloudinary.config), même si tu lances depuis /src
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+// remonte à la racine du dossier server : server/.env
+dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
-cloudinary.v2.config({
+// ── Maintenant seulement on configure Cloudinary avec des env garanties
+cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
+  api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-router.post("/signature", (req, res) => {
-  const timestamp = Math.round(Date.now() / 1000);
+// Petit log utile en dev (tronqué)
+if (process.env.NODE_ENV !== "production") {
+  const keyPeek = (process.env.CLOUDINARY_API_KEY || "").slice(0, 4);
+  console.log("[cloudinary] config", {
+    CLOUD_NAME: !!process.env.CLOUDINARY_CLOUD_NAME,
+    API_KEY: keyPeek ? `${keyPeek}***` : false,
+    API_SECRET: !!process.env.CLOUDINARY_API_SECRET,
+  });
+}
 
-  // ⚠️ ce dossier doit correspondre EXACTEMENT à celui utilisé dans Printing.jsx
-  const paramsToSign = { timestamp, folder: "cyberinfo/docs" };
-
-  const signature = cloudinary.v2.utils.api_sign_request(
-    paramsToSign,
-    process.env.CLOUDINARY_API_SECRET
-  );
-
-  console.log("🔹 Signature générée:", { timestamp, signature });
-  res.json({ timestamp, signature });
-});
-
-export default router;
+export default cloudinary;

@@ -1,17 +1,21 @@
+// models/docimpression.js
 import mongoose from "mongoose";
 
 const FileSchema = new mongoose.Schema({
-  url: String,
-  public_id: String,
-  format: String,
-  bytes: Number,
-  resource_type: String,
-  original_filename: String,
-}, { _id: false });
+  url: { type: String, required: true },
+  public_id: { type: String }, // pour delete Cloudinary
+  format: { type: String },
+  bytes: { type: Number },
+  resource_type: { type: String, enum: ["image", "video", "raw", "file", "auto"], default: "raw" },
+  original_filename: { type: String },
+  createdAt: { type: Date, default: Date.now },
+});
 
 const DocImpressionSchema = new mongoose.Schema({
-  name: { type: String, required: true, trim: true },
+  name: { type: String, required: true },
+  note: { type: String },
   files: { type: [FileSchema], default: [] },
-}, { timestamps: true });
+  createdAt: { type: Date, default: Date.now },
+});
 
 export default mongoose.model("DocImpression", DocImpressionSchema);

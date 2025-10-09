@@ -1,109 +1,148 @@
+// route/upload.js
 import express from "express";
 import multer from "multer";
-import path from "path";
-import fs from "fs";
+import cloudinary from "./cloudinary.js";
+import streamifier from "streamifier";
 
+const upload = multer({ storage: multer.memoryStorage() });
 const router = express.Router();
 
-// --- dossiers ---------------------------------------------------------------
-const baseDir   = path.resolve("uploads");
-const pdfsDir   = path.join(baseDir, "pdfs");
-const imagesDir = path.join(baseDir, "images");
-const mediaDir  = path.join(baseDir, "videos"); // vidéos + audios
-const filesDir  = path.join(baseDir, "files");  // tout le reste : docx, xlsx, zip, apk, etc.
+/* ---------- PING (GET) ----------
+   Permet de vérifier: GET /api/upload/ping -> { ok:true }
+*/
+router.get("/upload/ping", (_req, res) => {
+  return res.json({ ok: true, msg: "upload routes mounted" });
+});
 
-for (const d of [baseDir, pdfsDir, imagesDir, mediaDir, filesDir]) {
-  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+/* ---------- DIAG Cloudinary (GET) ----------
+   GET /api/diag/cloudinary -> montre si les env sont présents
+*/
+router.get("/diag/cloudinary", (_req, res) => {
+  const present = {
+    CLOUDINARY_CLOUD_NAME: !!process.env.CLOUDINARY_CLOUD_NAME,
+    CLOUDINARY_API_KEY: !!process.env.CLOUDINARY_API_KEY,
+    CLOUDINARY_API_SECRET: !!process.env.CLOUDINARY_API_SECRET,
+  };
+  const sampleCfg = {
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME || null,
+    api_key: (process.env.CLOUDINARY_API_KEY || "").slice(0, 4) + "***",
+  };
+  return res.json({ ok: true, present, sampleCfg });
+});
+
+/* ---------- SELFTEST (POST, sans multer) ----------
+   POST /api/upload/_selftest
+   Envoie une mini image 1x1 directement à Cloudinary.
+*/
+router.post("/upload/_selftest", async (_req, res) => {
+  try {
+    const base64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFVgJt+0DgYQAAAABJRU5ErkJggg==";
+    const dataUrl = `data:image/png;base64,${base64}`;
+
+    const result = await cloudinary.uploader.upload(dataUrl, {
+      folder: "cyberinfo/docs/selftest",
+      resource_type: "image",
+      use_filename: true,
+      unique_filename: true,
+    });
+
+    return res.json({
+      ok: true,
+      public_id: result.public_id,
+      url: result.secure_url,
+      resource_type: result.resource_type,
+    });
+  } catch (e) {
+    console.error("[SELFTEST] ERROR:", e?.message, e);
+    return res.status(500).json({ ok: false, where: "selftest", error: e?.message || "Selftest failed" });
+  }
+});
+
+/* ---------- helpers communs ---------- */
+function mustHaveCloudinaryEnv() {
+  const miss = [];
+  if (!process.env.CLOUDINARY_CLOUD_NAME) miss.push("CLOUDINARY_CLOUD_NAME");
+  if (!process.env.CLOUDINARY_API_KEY) miss.push("CLOUDINARY_API_KEY");
+  if (!process.env.CLOUDINARY_API_SECRET) miss.push("CLOUDINARY_API_SECRET");
+  return miss;
 }
 
-// --- helpers ----------------------------------------------------------------
-function storageTo(dir) {
-  return multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, dir),
-    filename: (_req, file, cb) => {
-      const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
-      cb(null, unique + path.extname(file.originalname));
-    },
+function uploadStreamToCloudinary({ file, resource_type = "image", folder = "cyberinfo/docs" }) {
+  return new Promise((resolve, reject) => {
+    const cld = cloudinary.uploader.upload_stream(
+      { resource_type, folder },
+      (err, result) => (err ? reject(err) : resolve(result))
+    );
+    streamifier.createReadStream(file.buffer).pipe(cld);
   });
 }
 
-function filterPdf(_req, file, cb) {
-  if (file.mimetype === "application/pdf") cb(null, true);
-  else cb(new Error("Seuls les PDF sont autorisés"));
-}
-function filterImage(_req, file, cb) {
-  if (file.mimetype.startsWith("image/")) cb(null, true);
-  else cb(new Error("Seules les images sont autorisées"));
-}
-function filterMedia(_req, file, cb) {
-  if (file.mimetype.startsWith("video/") || file.mimetype.startsWith("audio/")) cb(null, true);
-  else cb(new Error("Seules les vidéos/audios sont autorisées"));
-}
-// ✅ accepte tout (apk/exe inclus) — à utiliser avec limites !
-function filterAny(_req, _file, cb) {
-  cb(null, true);
+async function handleUpload(req, res, { resource_type, folder, label }) {
+  try {
+    const missing = mustHaveCloudinaryEnv();
+    if (missing.length) {
+      console.error("[UPLOAD] Missing env:", missing);
+      return res.status(500).json({ ok: false, error: `Missing env: ${missing.join(", ")}` });
+    }
+    if (!req.file) {
+      return res.status(400).json({ ok: false, error: "No file" });
+    }
+
+    console.log(`[UPLOAD] ${label} start`, {
+      name: req.file.originalname,
+      size: req.file.size,
+      mimetype: req.file.mimetype,
+      resource_type,
+      folder,
+    });
+
+    const result = await uploadStreamToCloudinary({ file: req.file, resource_type, folder });
+
+    console.log(`[UPLOAD] ${label} OK`, {
+      public_id: result.public_id,
+      bytes: result.bytes,
+      format: result.format,
+      resource_type: result.resource_type,
+      url: result.secure_url,
+    });
+
+    return res.json({
+      ok: true,
+      url: result.secure_url,
+      public_id: result.public_id,
+      bytes: result.bytes,
+      format: result.format,
+      resource_type: result.resource_type,
+      originalname: req.file.originalname,
+    });
+  } catch (e) {
+    const payload = {
+      ok: false,
+      error: e?.message || "Upload failed",
+      name: e?.name || null,
+      http_code: e?.http_code || null,
+    };
+    console.error(`[UPLOAD] ${label} ERROR:`, payload, e);
+    return res.status(500).json(payload);
+  }
 }
 
-// Limites (MB) — ajuste au besoin
-const MAX_IMAGE_MB = Number(process.env.MAX_IMAGE_MB || 25);
-const MAX_MEDIA_MB = Number(process.env.MAX_MEDIA_MB || 500);
-const MAX_FILE_MB  = Number(process.env.MAX_FILE_MB  || 200);
-
-const uploadPdf   = multer({ storage: storageTo(pdfsDir),   fileFilter: filterPdf });
-const uploadImage = multer({ storage: storageTo(imagesDir), fileFilter: filterImage, limits: { fileSize: MAX_IMAGE_MB * 1024 * 1024 } });
-const uploadMedia = multer({ storage: storageTo(mediaDir),  fileFilter: filterMedia, limits: { fileSize: MAX_MEDIA_MB * 1024 * 1024 } });
-const uploadFile  = multer({ storage: storageTo(filesDir),  fileFilter: filterAny,   limits: { fileSize: MAX_FILE_MB  * 1024 * 1024 } });
-
-// URL publique
-function publicUrl(req, subdir, filename) {
-  return `${req.protocol}://${req.get("host")}/uploads/${subdir}/${filename}`;
-}
-// sécuriser la jointure du chemin
-function safeJoin(base, file) {
-  const p = path.normalize(path.join(base, file));
-  return p.startsWith(base) ? p : null;
-}
-
-// --- UPLOADS ----------------------------------------------------------------
-router.post("/pdf", uploadPdf.single("file"), (req, res) => {
-  const url = publicUrl(req, "pdfs", req.file.filename);
-  res.json({ ok: true, url, bytes: req.file.size, originalname: req.file.originalname });
-});
-router.post("/image", uploadImage.single("file"), (req, res) => {
-  const url = publicUrl(req, "images", req.file.filename);
-  res.json({ ok: true, url, bytes: req.file.size, originalname: req.file.originalname });
-});
-router.post("/video", uploadMedia.single("file"), (req, res) => {
-  const url = publicUrl(req, "videos", req.file.filename);
-  res.json({ ok: true, url, bytes: req.file.size, originalname: req.file.originalname });
-});
-// ✅ route générique — accepte tout (docx/xlsx/pptx/csv/zip/rar/7z/apk/exe/etc.)
-router.post("/file", uploadFile.single("file"), (req, res) => {
-  const url = publicUrl(req, "files", req.file.filename);
-  res.json({ ok: true, url, bytes: req.file.size, originalname: req.file.originalname });
+/* ---------- ROUTES d'UPLOAD (POST multipart/form-data) ---------- */
+router.post("/upload/image", upload.single("file"), async (req, res) => {
+  await handleUpload(req, res, { resource_type: "image", folder: "cyberinfo/docs/images", label: "IMAGE" });
 });
 
-// --- DOWNLOAD forcé (Content-Disposition: attachment) -----------------------
-router.get("/pdf/:filename", (req, res) => {
-  const filePath = safeJoin(pdfsDir, req.params.filename);
-  if (!filePath || !fs.existsSync(filePath)) return res.status(404).send("Fichier introuvable");
-  return res.download(filePath, req.params.filename);
+router.post("/upload/video", upload.single("file"), async (req, res) => {
+  await handleUpload(req, res, { resource_type: "video", folder: "cyberinfo/docs/videos", label: "VIDEO" });
 });
-router.get("/image/:filename", (req, res) => {
-  const filePath = safeJoin(imagesDir, req.params.filename);
-  if (!filePath || !fs.existsSync(filePath)) return res.status(404).send("Fichier introuvable");
-  return res.download(filePath, req.params.filename);
+
+router.post("/upload/pdf", upload.single("file"), async (req, res) => {
+  await handleUpload(req, res, { resource_type: "raw", folder: "cyberinfo/docs/pdfs", label: "PDF" });
 });
-router.get("/video/:filename", (req, res) => {
-  const filePath = safeJoin(mediaDir, req.params.filename);
-  if (!filePath || !fs.existsSync(filePath)) return res.status(404).send("Fichier introuvable");
-  return res.download(filePath, req.params.filename);
-});
-// ✅ download générique
-router.get("/file/:filename", (req, res) => {
-  const filePath = safeJoin(filesDir, req.params.filename);
-  if (!filePath || !fs.existsSync(filePath)) return res.status(404).send("Fichier introuvable");
-  return res.download(filePath, req.params.filename);
+
+router.post("/upload/file", upload.single("file"), async (req, res) => {
+  await handleUpload(req, res, { resource_type: "raw", folder: "cyberinfo/docs/files", label: "FILE" });
 });
 
 export default router;
