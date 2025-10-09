@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import connectDB from "./lib/db.js";
-
+import proxyRoutes from "./route/proxy.js"; // ⬅️ AJOUT (déjà importé chez toi)
 import aadlRoutes from "./route/aadl.js";
 import aadldemande from "./route/addldemande.js";
 import docimpressionRoutes from "./route/docimpression.js";
@@ -55,6 +55,9 @@ app.get("/api/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 app.use("/api/uploads", express.static(path.resolve("uploads")));
 
 // ---------- API ----------
+// ✅ MONTE LE PROXY DE TÉLÉCHARGEMENT (une seule ligne ajoutée)
+app.use("/api", proxyRoutes);
+
 // IMPORTANT: on monte uploadRoutes sur "/api" (pas "/api/upload"),
 // car les chemins internes commencent par "/upload/..."
 app.use("/api", uploadRoutes);

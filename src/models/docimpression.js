@@ -1,12 +1,15 @@
-// models/docimpression.js
 import mongoose from "mongoose";
 
 const FileSchema = new mongoose.Schema({
   url: { type: String, required: true },
-  public_id: { type: String }, // pour delete Cloudinary
+  public_id: { type: String },
   format: { type: String },
   bytes: { type: Number },
-  resource_type: { type: String, enum: ["image", "video", "raw", "file", "auto"], default: "raw" },
+  resource_type: {
+    type: String,
+    enum: ["image", "video", "raw", "file", "auto"],
+    default: "raw",
+  },
   original_filename: { type: String },
   createdAt: { type: Date, default: Date.now },
 });
