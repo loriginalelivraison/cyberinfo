@@ -1,27 +1,23 @@
-# ---- image de base Debian avec Node + LibreOffice ----
-FROM debian:stable-slim
+# Image Node officielle + Debian (bookworm-slim)
+FROM node:20-bookworm-slim
 
-# installer Node, LibreOffice, OCR, etc.
+# Installer LibreOffice + fonts (et nettoyer les caches)
 RUN apt-get update && apt-get install -y \
-    nodejs npm \
     libreoffice libreoffice-writer \
-    tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng \
-    ocrmypdf ghostscript qpdf \
     fonts-dejavu fonts-noto fonts-noto-cjk fonts-noto-color-emoji \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# copier et installer les dépendances
+# Dépendances
 COPY package*.json ./
 RUN npm ci --omit=dev || npm install --omit=dev
 
-# copier tout le code
+# Code
 COPY . .
 
-# port d’écoute (Render assignera PORT)
+ENV NODE_ENV=production
 ENV PORT=8080
 EXPOSE 8080
 
-# lancer ton serveur
 CMD ["node", "src/index.js"]

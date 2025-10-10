@@ -5,35 +5,28 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import connectDB from "./lib/db.js";
-import proxyRoutes from "./route/proxy.js"; // ⬅️ AJOUT (déjà importé chez toi)
+
+import proxyRoutes from "./route/proxy.js";            // tes routes existantes
 import aadlRoutes from "./route/aadl.js";
 import aadldemande from "./route/addldemande.js";
 import docimpressionRoutes from "./route/docimpression.js";
 import uploadRoutes from "./route/upload.js";
 
-import pdf2docxWordRoutes from "./route/pdf2docx-word.js";
+import pdf2docxLibreRoutes from "./route/pdf2docx-libreoffice.js";
+import pdf2docxWordRoutes from "./route/pdf2docx-word.js"; // Windows-only
 
-
-
-// --- Résout le chemin du .env même si tu lances depuis /src ---
+// ----- .env load (depuis /server/.env si tu lances dans /server/src) -----
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-// .env situé à la racine du dossier server (un niveau au-dessus de src)
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
 const app = express();
 
 // ---------- middlewares ----------
-app.use(express.json({ limit: "25mb" }));
+app.use(express.json({ limit: "30mb" }));
+app.use(express.urlencoded({ extended: true, limit: "30mb" }));
 
-const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || "")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
-
-app.use((req, res, next) => { res.setHeader("Vary", "Origin"); next(); });
-
-
+// CORS: domaines autorisés via CORS_ORIGIN="https://monsite.com,https://app.vercel.app"
 const ALLOWED = (process.env.CORS_ORIGIN || "")
   .split(",")
   .map(s => s.trim())
@@ -43,13 +36,10 @@ app.use((req, res, next) => { res.setHeader("Vary", "Origin"); next(); });
 
 app.use(cors({
   origin(origin, cb) {
-    // Pas d'en-tête Origin => Postman, cURL, browser direct: autoriser
-    if (!origin) return cb(null, true);
-
-    // Autoriser ton/tes domaines exacts listés dans CORS_ORIGIN
+    if (!origin) return cb(null, true); // Postman/cURL
     if (ALLOWED.includes(origin)) return cb(null, true);
 
-    // Autoriser toutes les préviews Vercel: https://<any>-<proj>-<user>.vercel.app
+    // Autoriser toutes les préviews Vercel
     try {
       const { hostname } = new URL(origin);
       if (hostname.endsWith(".vercel.app")) return cb(null, true);
@@ -75,37 +65,32 @@ await connectDB(process.env.MONGODB_URI);
 // ---------- health ----------
 app.get("/api/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
-// (Optionnel dev) servir des fichiers locaux si tu en gardes:
+// (Optionnel) servir des fichiers locaux si tu en gardes:
 app.use("/api/uploads", express.static(path.resolve("uploads")));
 
-// ---------- API ----------
-// ✅ MONTE LE PROXY DE TÉLÉCHARGEMENT (une seule ligne ajoutée)
+// ---------- API métiers ----------
 app.use("/api", proxyRoutes);
-
-// IMPORTANT: on monte uploadRoutes sur "/api" (pas "/api/upload"),
-// car les chemins internes commencent par "/upload/..."
 app.use("/api", uploadRoutes);
 app.use("/api", docimpressionRoutes);
-
-// tes autres routes métiers
 app.use("/api/", aadlRoutes);
 app.use("/api/aadl", aadldemande);
 
-
+// ---------- Conversion PDF -> DOCX (OS switch) ----------
 const IS_WINDOWS = process.platform === "win32";
 console.log("[ENV] OS:", IS_WINDOWS ? "Windows" : "Linux");
 
-// et tu peux, dans tes routes, choisir la bonne méthode :
-if (!IS_WINDOWS) {
-  console.log("[INFO] Running LibreOffice mode (Linux)");
+if (IS_WINDOWS) {
+  console.log("[MODE] Windows/Word COM (route: /api/convert/pdf-to-word/word)");
+  app.use("/api", pdf2docxWordRoutes);
+} else {
+  console.log("[MODE] Linux/LibreOffice (route: /api/convert/pdf-to-word)");
+  app.use("/api", pdf2docxLibreRoutes);
 }
 
-app.use("/api", pdf2docxWordRoutes);
 // ---------- boot ----------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`[HTTP] http://localhost:${PORT}`);
-  // Petit check utile en dev (tronqué) :
   const keyPeek = (process.env.CLOUDINARY_API_KEY || "").slice(0, 4);
   console.log("[ENV] Cloudinary loaded:",
     {
