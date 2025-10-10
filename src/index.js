@@ -11,6 +11,10 @@ import aadldemande from "./route/addldemande.js";
 import docimpressionRoutes from "./route/docimpression.js";
 import uploadRoutes from "./route/upload.js";
 
+import pdf2docxWordRoutes from "./route/pdf2docx-word.js";
+
+
+
 // --- Résout le chemin du .env même si tu lances depuis /src ---
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -67,6 +71,10 @@ app.use("/api", docimpressionRoutes);
 app.use("/api/", aadlRoutes);
 app.use("/api/aadl", aadldemande);
 
+
+
+
+app.use("/api", pdf2docxWordRoutes);
 // ---------- boot ----------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
