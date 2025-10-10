@@ -92,7 +92,13 @@ app.use("/api/", aadlRoutes);
 app.use("/api/aadl", aadldemande);
 
 
+const IS_WINDOWS = process.platform === "win32";
+console.log("[ENV] OS:", IS_WINDOWS ? "Windows" : "Linux");
 
+// et tu peux, dans tes routes, choisir la bonne méthode :
+if (!IS_WINDOWS) {
+  console.log("[INFO] Running LibreOffice mode (Linux)");
+}
 
 app.use("/api", pdf2docxWordRoutes);
 // ---------- boot ----------
