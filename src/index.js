@@ -33,14 +33,34 @@ const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || "")
 
 app.use((req, res, next) => { res.setHeader("Vary", "Origin"); next(); });
 
+
+const ALLOWED = (process.env.CORS_ORIGIN || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+app.use((req, res, next) => { res.setHeader("Vary", "Origin"); next(); });
+
 app.use(cors({
   origin(origin, cb) {
-    if (!origin) return cb(null, true); // Postman/curl
-    if (ALLOWED_ORIGINS.length === 0) return cb(null, true);
-    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    return cb(new Error(`CORS blocked: ${origin}`));
+    // Pas d'en-tête Origin => Postman, cURL, browser direct: autoriser
+    if (!origin) return cb(null, true);
+
+    // Autoriser ton/tes domaines exacts listés dans CORS_ORIGIN
+    if (ALLOWED.includes(origin)) return cb(null, true);
+
+    // Autoriser toutes les préviews Vercel: https://<any>-<proj>-<user>.vercel.app
+    try {
+      const { hostname } = new URL(origin);
+      if (hostname.endsWith(".vercel.app")) return cb(null, true);
+    } catch { /* ignore */ }
+
+    return cb(new Error("CORS blocked: " + origin));
   },
   credentials: true,
+  methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  optionsSuccessStatus: 204,
 }));
 
 app.options("*", cors());
