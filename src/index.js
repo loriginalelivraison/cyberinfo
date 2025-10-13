@@ -1,4 +1,4 @@
-// src/index.js
+// server/src/index.js
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -6,7 +6,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import connectDB from "./lib/db.js";
 
-import proxyRoutes from "./route/proxy.js";            // tes routes existantes
+import proxyRoutes from "./route/proxy.js";
 import aadlRoutes from "./route/aadl.js";
 import aadldemande from "./route/addldemande.js";
 import docimpressionRoutes from "./route/docimpression.js";
@@ -15,7 +15,7 @@ import uploadRoutes from "./route/upload.js";
 import pdf2docxLibreRoutes from "./route/pdf2docx-libreoffice.js";
 import pdf2docxWordRoutes from "./route/pdf2docx-word.js"; // Windows-only
 
-// ----- .env load (depuis /server/.env si tu lances dans /server/src) -----
+// ----- .env -----
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
@@ -52,7 +52,6 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization"],
   optionsSuccessStatus: 204,
 }));
-
 app.options("*", cors());
 
 // ---------- DB ----------
@@ -85,6 +84,22 @@ if (IS_WINDOWS) {
 } else {
   console.log("[MODE] Linux/LibreOffice (route: /api/convert/pdf-to-word)");
   app.use("/api", pdf2docxLibreRoutes);
+}
+
+/* --- Alias robustes : les deux chemins existent toujours --- */
+// Ainsi, même si le front appelle le mauvais chemin, pas de 404.
+if (IS_WINDOWS) {
+  // Permet aussi /api/convert/pdf-to-word sous Windows (redirige vers /word)
+  app.use("/api/convert/pdf-to-word", (req, res, next) => {
+    req.url = "/convert/pdf-to-word/word";
+    pdf2docxWordRoutes(req, res, next);
+  });
+} else {
+  // Permet aussi /api/convert/pdf-to-word/word sous Linux (redirige vers /)
+  app.use("/api/convert/pdf-to-word/word", (req, res, next) => {
+    req.url = "/convert/pdf-to-word";
+    pdf2docxLibreRoutes(req, res, next);
+  });
 }
 
 // ---------- boot ----------
