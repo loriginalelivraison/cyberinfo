@@ -7,28 +7,25 @@ import { spawn } from "child_process";
 
 const router = express.Router();
 
-// Mémoire (Render/Heroku) + limite 25 Mo (ajuste si tu veux)
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 },
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50 Mo (ajuste si besoin)
 });
 
 const TMP_DIR = "/tmp";
 
-// Détecte binaire LibreOffice (chemin absolu recommandé en prod Linux)
 async function detectSofficeBin() {
-  const candidates = ["/usr/bin/soffice", "soffice", "libreoffice"];
-  for (const c of candidates) {
+  const bins = ["/usr/bin/soffice", "soffice", "libreoffice"];
+  for (const b of bins) {
     try {
       await new Promise((resolve, reject) => {
-        const p = spawn(c, ["--version"], { env: { ...process.env, HOME: "/tmp" } });
-        let ok = false;
-        p.stdout.on("data", () => (ok = true));
-        p.stderr.on("data", () => {}); // ignore
+        const p = spawn(b, ["--version"], { env: { ...process.env, HOME: "/tmp" } });
+        let seen = false;
+        p.stdout.on("data", () => (seen = true));
         p.on("error", reject);
-        p.on("close", () => (ok ? resolve() : reject(new Error("no output"))));
+        p.on("close", (code) => (seen && code === 0 ? resolve() : reject(new Error("no output"))));
       });
-      return c;
+      return b;
     } catch {}
   }
   return null;
@@ -43,28 +40,33 @@ router.post("/convert/pdf-to-word", upload.single("file"), async (req, res) => {
 
     const bin = await detectSofficeBin();
     if (!bin) {
-      return res.status(500).json({ error: "LibreOffice introuvable (soffice). Déploie avec Dockerfile ou installe libreoffice." });
+      return res.status(500).json({ error: "LibreOffice introuvable (soffice). Déploie avec Dockerfile incluant libreoffice." });
     }
 
     const id = randomUUID();
     const inPath = path.join(TMP_DIR, `${id}.pdf`);
     const outPath = path.join(TMP_DIR, `${id}.docx`);
-    await fs.writeFile(inPath, req.file.buffer);
+    const profileDir = path.join(TMP_DIR, `lo-profile-${id}`);
 
-    // Arguments robustes
+    await fs.writeFile(inPath, req.file.buffer);
+    await fs.mkdir(profileDir, { recursive: true });
+
+    const userInstallation = `-env:UserInstallation=file://${profileDir.replace(/\\/g, "/")}`;
+
     const args = [
       "--headless",
       "--nologo",
       "--norestore",
       "--nodefault",
-      "--invisible",
-      // filtre DOCX
+      "--nolockcheck",
+      "--nocrashreport",
+      userInstallation,
       "--convert-to", "docx:MS Word 2007 XML",
       "--outdir", TMP_DIR,
       inPath,
     ];
 
-    // ↑ Render : HOME=/tmp évite les locks de profil
+    // Timeout plus large (5 min) + HOME=/tmp pour éviter les locks
     const child = spawn(bin, args, {
       env: { ...process.env, HOME: "/tmp" },
     });
@@ -73,42 +75,28 @@ router.post("/convert/pdf-to-word", upload.single("file"), async (req, res) => {
     child.stdout.on("data", d => (stdout += d.toString()));
     child.stderr.on("data", d => (stderr += d.toString()));
 
-    const KILL_AFTER_MS = 180_000; // 180 s
+    const KILL_AFTER_MS = 300_000; // 5 minutes
     const killer = setTimeout(() => {
       try { child.kill("SIGKILL"); } catch {}
     }, KILL_AFTER_MS);
 
     child.on("error", async (err) => {
       clearTimeout(killer);
-      await fs.rm(inPath, { force: true });
-      return res.status(500).json({
-        error: "Conversion failed (spawn error)",
-        details: String(err),
-      });
+      await safeCleanup([inPath, outPath, profileDir]);
+      return res.status(500).json({ error: "Conversion failed (spawn error)", details: String(err) });
     });
 
     child.on("close", async (code, signal) => {
       clearTimeout(killer);
       try {
         if (signal) {
-          // tué par timeout ou autre signal
-          await fs.rm(inPath, { force: true });
-          return res.status(500).json({
-            error: "LibreOffice interrompu",
-            signal,
-            stdout,
-            stderr,
-          });
+          await safeCleanup([inPath, outPath, profileDir]);
+          return res.status(500).json({ error: "LibreOffice interrompu", signal, stdout, stderr });
         }
         if (code !== 0) {
-          await fs.rm(inPath, { force: true });
-          return res.status(500).json({
-            error: `LibreOffice exit ${code}`,
-            stdout,
-            stderr,
-          });
+          await safeCleanup([inPath, outPath, profileDir]);
+          return res.status(500).json({ error: `LibreOffice exit ${code}`, stdout, stderr });
         }
-        // OK
         const buf = await fs.readFile(outPath);
         res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
         const base = (req.file.originalname || "document.pdf").replace(/\.pdf$/i, "");
@@ -117,10 +105,7 @@ router.post("/convert/pdf-to-word", upload.single("file"), async (req, res) => {
       } catch (e) {
         return res.status(500).json({ error: "Readback failed", details: String(e), stdout, stderr });
       } finally {
-        await Promise.all([
-          fs.rm(inPath, { force: true }),
-          fs.rm(outPath, { force: true }),
-        ]);
+        await safeCleanup([inPath, outPath, profileDir]);
       }
     });
   } catch (e) {
@@ -128,7 +113,15 @@ router.post("/convert/pdf-to-word", upload.single("file"), async (req, res) => {
   }
 });
 
-// Debug: version de soffice (utile en prod)
+async function safeCleanup(paths) {
+  for (const p of paths) {
+    try {
+      await fs.rm(p, { force: true, recursive: true });
+    } catch {}
+  }
+}
+
+// Debug: version de soffice
 router.get("/debug/soffice", (req, res) => {
   const child = spawn("/usr/bin/soffice", ["--version"], { env: { ...process.env, HOME: "/tmp" } });
   let out = "", err = "";
