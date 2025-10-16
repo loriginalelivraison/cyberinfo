@@ -1,15 +1,20 @@
+# Dockerfile (corrigé)
 FROM node:20-bookworm-slim
 
-RUN apt-get update && apt-get install -y \
-    libreoffice \
-    libreoffice-writer \
-    libreoffice-draw \
-    libreoffice-pdfimport \
-    fonts-dejavu \
-    fonts-noto \
-    fonts-noto-cjk \
-    fonts-noto-color-emoji \
-    ghostscript \
+ENV DEBIAN_FRONTEND=noninteractive
+
+# MAJ + install LO (draw inclut l'import PDF), polices, ghostscript
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libreoffice \
+      libreoffice-writer \
+      libreoffice-draw \
+      fonts-dejavu \
+      fonts-noto-core \
+      fonts-noto-cjk \
+      fonts-noto-color-emoji \
+      ghostscript \
+      ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
